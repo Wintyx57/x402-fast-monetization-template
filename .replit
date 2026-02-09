@@ -1,0 +1,9 @@
+run = "pip install -r requirements.txt && python main.py"
+language = "python3"
+entrypoint = "main.py"
+
+[nix]
+channel = "stable-24_05"
+
+[deployment]
+run = ["sh", "-c", "python main.py"]
