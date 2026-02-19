@@ -5,7 +5,7 @@ Monetize any Python function with USDC payments on Base via HTTP 402.
 # ===========================================================================
 # SECTION 1: Imports & Configuration
 # ===========================================================================
-import os, io, random, inspect, asyncio, logging
+import os, io, random, inspect, asyncio, logging, threading, time
 from collections import Counter
 
 import httpx, uvicorn, qrcode
@@ -36,46 +36,95 @@ logger = logging.getLogger("x402")
 # SECTION 2: Payment Verification Engine
 # ===========================================================================
 used_tx_hashes: set[str] = set()
+_tx_lock = threading.Lock()
+
+# Maximum age for accepted transactions (seconds)
+MAX_TX_AGE_SECONDS = 300  # 5 minutes
 
 
-async def verify_payment(tx_hash: str, expected_amount: float) -> dict:
-    """Verify a USDC payment on Base via eth_getTransactionReceipt."""
+async def verify_payment(tx_hash: str, expected_amount: float, expected_sender: str | None = None) -> dict:
+    """Verify a USDC payment on Base via eth_getTransactionReceipt.
+
+    S8 fix: Reserve the tx hash BEFORE blockchain verification to prevent race conditions.
+    S7 fix: Verify the sender address matches the expected payer.
+    """
     tx_hash = tx_hash.strip().lower()
 
-    if tx_hash in used_tx_hashes:
-        return {"valid": False, "error": "Transaction already used"}
+    # S8 — Atomic check-and-reserve to prevent double-spend race condition
+    with _tx_lock:
+        if tx_hash in used_tx_hashes:
+            return {"valid": False, "error": "Transaction already used"}
+        used_tx_hashes.add(tx_hash)  # Reserve immediately
 
-    rpc_payload = {
-        "jsonrpc": "2.0", "id": 1,
-        "method": "eth_getTransactionReceipt", "params": [tx_hash],
-    }
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(BASE_RPC_URL, json=rpc_payload)
-    receipt = resp.json().get("result")
+    try:
+        rpc_payload = {
+            "jsonrpc": "2.0", "id": 1,
+            "method": "eth_getTransactionReceipt", "params": [tx_hash],
+        }
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(BASE_RPC_URL, json=rpc_payload)
+        receipt = resp.json().get("result")
 
-    if not receipt:
-        return {"valid": False, "error": "Transaction not found or invalid"}
-    if receipt.get("status") != "0x1":
-        return {"valid": False, "error": "Transaction reverted"}
+        if not receipt:
+            with _tx_lock:
+                used_tx_hashes.discard(tx_hash)
+            return {"valid": False, "error": "Transaction not found or invalid"}
+        if receipt.get("status") != "0x1":
+            with _tx_lock:
+                used_tx_hashes.discard(tx_hash)
+            return {"valid": False, "error": "Transaction reverted"}
 
-    expected_raw = int(expected_amount * (10 ** USDC_DECIMALS))
-    for log in receipt.get("logs", []):
-        if log.get("address", "").lower() != USDC_CONTRACT.lower():
-            continue
-        topics = log.get("topics", [])
-        if len(topics) < 3 or topics[0].lower() != TRANSFER_TOPIC:
-            continue
-        to_addr = "0x" + topics[2][-40:]
-        if to_addr.lower() != WALLET_ADDRESS:
-            continue
-        raw_amount = int(log.get("data", "0x0"), 16)
-        if raw_amount >= expected_raw:
-            used_tx_hashes.add(tx_hash)
-            return {"valid": True, "error": None}
-        got = raw_amount / (10 ** USDC_DECIMALS)
-        return {"valid": False, "error": f"Insufficient payment: expected {expected_amount} USDC, got {got}"}
+        # S7 — Verify transaction is recent (block timestamp < 5 minutes ago)
+        block_hex = receipt.get("blockNumber")
+        if block_hex:
+            block_payload = {
+                "jsonrpc": "2.0", "id": 2,
+                "method": "eth_getBlockByNumber", "params": [block_hex, False],
+            }
+            async with httpx.AsyncClient(timeout=15) as client:
+                block_resp = await client.post(BASE_RPC_URL, json=block_payload)
+            block_result = block_resp.json().get("result")
+            if block_result:
+                block_ts = int(block_result.get("timestamp", "0x0"), 16)
+                if time.time() - block_ts > MAX_TX_AGE_SECONDS:
+                    with _tx_lock:
+                        used_tx_hashes.discard(tx_hash)
+                    return {"valid": False, "error": f"Transaction too old (>{MAX_TX_AGE_SECONDS}s). Only recent transactions accepted."}
 
-    return {"valid": False, "error": "No matching USDC transfer found in transaction"}
+        expected_raw = int(expected_amount * (10 ** USDC_DECIMALS))
+        for log_entry in receipt.get("logs", []):
+            if log_entry.get("address", "").lower() != USDC_CONTRACT.lower():
+                continue
+            topics = log_entry.get("topics", [])
+            if len(topics) < 3 or topics[0].lower() != TRANSFER_TOPIC:
+                continue
+            to_addr = "0x" + topics[2][-40:]
+            if to_addr.lower() != WALLET_ADDRESS:
+                continue
+
+            # S7 — Verify sender matches expected payer
+            from_addr = "0x" + topics[1][-40:]
+            if expected_sender and from_addr.lower() != expected_sender.strip().lower():
+                with _tx_lock:
+                    used_tx_hashes.discard(tx_hash)
+                return {"valid": False, "error": f"Payment sender mismatch: expected {expected_sender}, got {from_addr}"}
+
+            raw_amount = int(log_entry.get("data", "0x0"), 16)
+            if raw_amount >= expected_raw:
+                return {"valid": True, "error": None}
+            got = raw_amount / (10 ** USDC_DECIMALS)
+            with _tx_lock:
+                used_tx_hashes.discard(tx_hash)
+            return {"valid": False, "error": f"Insufficient payment: expected {expected_amount} USDC, got {got}"}
+
+        with _tx_lock:
+            used_tx_hashes.discard(tx_hash)
+        return {"valid": False, "error": "No matching USDC transfer found in transaction"}
+    except Exception as exc:
+        # On any error, release the reserved hash
+        with _tx_lock:
+            used_tx_hashes.discard(tx_hash)
+        raise exc
 
 # ===========================================================================
 # SECTION 3: Decorator @x402_paywall
@@ -109,11 +158,13 @@ def x402_paywall(price: float, description: str = "", tags: list[str] | None = N
                         "network": "Base", "chain_id": 8453,
                         "recipient": WALLET_ADDRESS,
                         "usdc_contract": USDC_CONTRACT, "rpc_url": BASE_RPC_URL,
-                        "instructions": "Send USDC on Base to the recipient address, then retry with header X-Payment-TxHash: 0x...",
+                        "instructions": "Send USDC on Base to the recipient address, then retry with headers X-Payment-TxHash: 0x... and X-Payer-Address: 0x...",
                     },
                 })
 
-            check = await verify_payment(tx_hash, price)
+            # S7 — Verify sender address if provided
+            payer_address = request.headers.get("X-Payer-Address")
+            check = await verify_payment(tx_hash, price, expected_sender=payer_address)
             if not check["valid"]:
                 return JSONResponse(status_code=402, content={"error": check["error"]})
 
