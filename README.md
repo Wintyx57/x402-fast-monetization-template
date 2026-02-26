@@ -246,12 +246,18 @@ Everything runs from `main.py`. One file, no framework boilerplate, no build ste
 
 ---
 
-## Links
+## Ecosystem
 
-- **x402 Bazaar Marketplace** -- [https://x402bazaar.org](https://x402bazaar.org)
-- **CLI Quick Start** -- `npx x402-bazaar init`
-- **Backend Repository** -- [https://github.com/Wintyx57/x402-backend](https://github.com/Wintyx57/x402-backend)
-- **Frontend Repository** -- [https://github.com/Wintyx57/x402-frontend](https://github.com/Wintyx57/x402-frontend)
+| Repository | Description |
+|---|---|
+| **[x402-backend](https://github.com/Wintyx57/x402-backend)** | API server, 69 native endpoints, payment middleware, MCP server |
+| **[x402-frontend](https://github.com/Wintyx57/x402-frontend)** | React + TypeScript UI, wallet connect |
+| **[x402-bazaar-cli](https://github.com/Wintyx57/x402-bazaar-cli)** | `npx x402-bazaar` -- CLI with 7 commands |
+| **[x402-sdk](https://github.com/Wintyx57/x402-sdk)** | TypeScript SDK for AI agents |
+| **[x402-langchain](https://github.com/Wintyx57/x402-langchain)** | Python LangChain tools |
+| **[x402-fast-monetization-template](https://github.com/Wintyx57/x402-fast-monetization-template)** | FastAPI template (this repo) |
+
+**Live:** [x402bazaar.org](https://x402bazaar.org) | **API:** [x402-api.onrender.com](https://x402-api.onrender.com)
 
 ---
 
