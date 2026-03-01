@@ -5,8 +5,9 @@ Monetize any Python function with USDC payments on Base via HTTP 402.
 # ===========================================================================
 # SECTION 1: Imports & Configuration
 # ===========================================================================
-import os, io, random, inspect, asyncio, logging, threading, time
+import os, io, random, inspect, asyncio, logging, threading, time, json, hmac, hashlib, fcntl
 from collections import Counter
+from pathlib import Path
 
 import httpx, uvicorn, qrcode
 from dotenv import load_dotenv
@@ -19,12 +20,54 @@ USDC_CONTRACT = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 USDC_DECIMALS = 6
 
+# ===========================================================================
+# SECTION 1A: Input Validation Functions
+# ===========================================================================
+def validate_ethereum_address(addr: str) -> str:
+    """Validate and normalize an Ethereum address (0x + 40 hex chars)."""
+    if not addr:
+        raise ValueError("Address cannot be empty")
+    addr = addr.strip()
+    if not addr.startswith("0x"):
+        raise ValueError(f"Address must start with '0x', got: {addr}")
+    if len(addr) != 42:
+        raise ValueError(f"Address must be exactly 42 chars (0x + 40 hex), got {len(addr)} chars")
+    try:
+        int(addr[2:], 16)
+    except ValueError:
+        raise ValueError(f"Address contains invalid hex characters: {addr}")
+    return addr.lower()
+
+
+def validate_rpc_url(url: str) -> str:
+    """Validate RPC URL format (must be https:// or http://localhost)."""
+    if not url:
+        raise ValueError("RPC URL cannot be empty")
+    url = url.strip()
+    if url.startswith("https://"):
+        return url
+    if url.startswith("http://localhost"):
+        return url
+    raise ValueError(
+        f"RPC URL must use https:// or http://localhost. Got: {url}\n"
+        "For security, only HTTPS RPC endpoints or localhost are allowed."
+    )
+
+
 WALLET_ADDRESS = os.getenv("WALLET_ADDRESS")
 if not WALLET_ADDRESS:
     raise RuntimeError("WALLET_ADDRESS is required. Set it in your .env file.")
-WALLET_ADDRESS = WALLET_ADDRESS.lower()
+try:
+    WALLET_ADDRESS = validate_ethereum_address(WALLET_ADDRESS)
+except ValueError as e:
+    raise RuntimeError(f"Invalid WALLET_ADDRESS: {e}")
 
 BASE_RPC_URL = os.getenv("BASE_RPC_URL", "https://mainnet.base.org")
+try:
+    BASE_RPC_URL = validate_rpc_url(BASE_RPC_URL)
+except ValueError as e:
+    raise RuntimeError(f"Invalid BASE_RPC_URL: {e}")
+
 BAZAAR_REGISTRY_URL = os.getenv("BAZAAR_REGISTRY_URL", "")
 API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
 PORT = int(os.getenv("PORT", "8000"))
@@ -33,28 +76,186 @@ app = FastAPI(title="x402 API", description="Pay-per-call API powered by x402 pr
 logger = logging.getLogger("x402")
 
 # ===========================================================================
-# SECTION 2: Payment Verification Engine
+# SECTION 2: Persistent Transaction Store
 # ===========================================================================
-used_tx_hashes: set[str] = set()
-_tx_lock = threading.Lock()
+# File-based storage for used transaction hashes to prevent replay attacks
+# across server restarts and multiple uvicorn workers.
 
-# Maximum age for accepted transactions (seconds)
-MAX_TX_AGE_SECONDS = 300  # 5 minutes
+TX_STORE_PATH = Path(os.getenv("TX_STORE_PATH", "tx_store.json"))
+TX_STORE_LOCK_PATH = TX_STORE_PATH.with_suffix(".lock")
+MAX_TX_AGE_SECONDS = int(os.getenv("TX_MAX_AGE_SECONDS", "300"))  # 5 minutes default
+
+if MAX_TX_AGE_SECONDS < 60:
+    logger.warning("TX_MAX_AGE_SECONDS is very small (%d seconds), consider increasing for robustness", MAX_TX_AGE_SECONDS)
+
+
+def _acquire_lock():
+    """Acquire file lock for safe concurrent access to tx_store.json."""
+    lock_file = open(TX_STORE_LOCK_PATH, "a")
+    try:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        return lock_file
+    except Exception:
+        lock_file.close()
+        raise
+
+
+def _release_lock(lock_file):
+    """Release file lock."""
+    try:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    finally:
+        lock_file.close()
+
+
+def _load_tx_store() -> dict:
+    """Load used transaction hashes from persistent storage.
+
+    Returns dict with format: {"hashes": [{"hash": "0x...", "timestamp": 123456}]}
+    """
+    if not TX_STORE_PATH.exists():
+        return {"hashes": []}
+    try:
+        with open(TX_STORE_PATH, "r") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError):
+        logger.warning("Failed to load tx_store, starting fresh")
+        return {"hashes": []}
+
+
+def _save_tx_store(data: dict):
+    """Persist transaction hashes to file with atomic write."""
+    try:
+        # Write to temp file first, then rename for atomicity
+        temp_path = TX_STORE_PATH.with_suffix(".tmp")
+        with open(temp_path, "w") as f:
+            json.dump(data, f)
+        temp_path.replace(TX_STORE_PATH)
+    except IOError as e:
+        logger.error("Failed to save tx_store: %s", e)
+
+
+def _cleanup_expired_hashes(data: dict) -> dict:
+    """Remove transaction hashes older than MAX_TX_AGE_SECONDS."""
+    current_time = time.time()
+    original_count = len(data["hashes"])
+    data["hashes"] = [
+        entry for entry in data["hashes"]
+        if current_time - entry["timestamp"] <= MAX_TX_AGE_SECONDS
+    ]
+    if len(data["hashes"]) < original_count:
+        logger.debug("Cleaned up %d expired transaction hashes", original_count - len(data["hashes"]))
+    return data
+
+
+def is_tx_hash_used(tx_hash: str) -> bool:
+    """Check if transaction hash has been used (timing-safe comparison)."""
+    lock_file = _acquire_lock()
+    try:
+        data = _load_tx_store()
+        data = _cleanup_expired_hashes(data)
+
+        for entry in data["hashes"]:
+            # Use timing-safe comparison to prevent timing attacks
+            if hmac.compare_digest(entry["hash"], tx_hash.lower()):
+                return True
+        return False
+    finally:
+        _release_lock(lock_file)
+
+
+def mark_tx_hash_used(tx_hash: str) -> bool:
+    """Mark a transaction hash as used. Returns False if already used."""
+    lock_file = _acquire_lock()
+    try:
+        data = _load_tx_store()
+        data = _cleanup_expired_hashes(data)
+
+        tx_hash_lower = tx_hash.lower()
+
+        # Check if already used (timing-safe)
+        for entry in data["hashes"]:
+            if hmac.compare_digest(entry["hash"], tx_hash_lower):
+                return False  # Already used
+
+        # Add new hash
+        data["hashes"].append({
+            "hash": tx_hash_lower,
+            "timestamp": time.time()
+        })
+        _save_tx_store(data)
+        return True
+    finally:
+        _release_lock(lock_file)
+
+
+def remove_tx_hash_reservation(tx_hash: str):
+    """Remove a transaction hash reservation (called on verification failure)."""
+    lock_file = _acquire_lock()
+    try:
+        data = _load_tx_store()
+        data = _cleanup_expired_hashes(data)
+
+        tx_hash_lower = tx_hash.lower()
+        original_count = len(data["hashes"])
+
+        # Remove the hash
+        data["hashes"] = [
+            entry for entry in data["hashes"]
+            if not hmac.compare_digest(entry["hash"], tx_hash_lower)
+        ]
+
+        if len(data["hashes"]) < original_count:
+            _save_tx_store(data)
+            logger.debug("Removed tx_hash reservation for failed verification")
+    finally:
+        _release_lock(lock_file)
+
+
+# Load and cleanup existing hashes at startup
+@app.on_event("startup")
+async def _startup_handler():
+    """Handle startup: clean up expired hashes and register marketplace."""
+    # Clean up expired transaction hashes
+    lock_file = _acquire_lock()
+    try:
+        data = _load_tx_store()
+        original_count = len(data["hashes"])
+        data = _cleanup_expired_hashes(data)
+        if len(data["hashes"]) < original_count:
+            _save_tx_store(data)
+            logger.info(
+                "Cleaned up %d expired hashes at startup (max_age=%ds)",
+                original_count - len(data["hashes"]),
+                MAX_TX_AGE_SECONDS
+            )
+    finally:
+        _release_lock(lock_file)
+
+    # Register on marketplace
+    await _register_on_marketplace()
+
+
+# ===========================================================================
+# SECTION 2B: Payment Verification Engine
+# ===========================================================================
 
 
 async def verify_payment(tx_hash: str, expected_amount: float, expected_sender: str | None = None) -> dict:
     """Verify a USDC payment on Base via eth_getTransactionReceipt.
 
-    S8 fix: Reserve the tx hash BEFORE blockchain verification to prevent race conditions.
-    S7 fix: Verify the sender address matches the expected payer.
+    This function implements multiple security checks:
+    - S8: Atomic check-and-reserve to prevent double-spend race conditions (file-based, persistent)
+    - S7: Verify sender address matches expected payer
+    - S6: Use timing-safe comparison to prevent timing attacks
+    - S5: Validate transaction age
     """
     tx_hash = tx_hash.strip().lower()
 
-    # S8 — Atomic check-and-reserve to prevent double-spend race condition
-    with _tx_lock:
-        if tx_hash in used_tx_hashes:
-            return {"valid": False, "error": "Transaction already used"}
-        used_tx_hashes.add(tx_hash)  # Reserve immediately
+    # S8 — Atomic check-and-reserve using persistent file store to prevent
+    # double-spend race conditions across server restarts and multiple workers
+    if not mark_tx_hash_used(tx_hash):
+        return {"valid": False, "error": "Transaction already used"}
 
     try:
         rpc_payload = {
@@ -66,15 +267,13 @@ async def verify_payment(tx_hash: str, expected_amount: float, expected_sender: 
         receipt = resp.json().get("result")
 
         if not receipt:
-            with _tx_lock:
-                used_tx_hashes.discard(tx_hash)
+            remove_tx_hash_reservation(tx_hash)
             return {"valid": False, "error": "Transaction not found or invalid"}
         if receipt.get("status") != "0x1":
-            with _tx_lock:
-                used_tx_hashes.discard(tx_hash)
+            remove_tx_hash_reservation(tx_hash)
             return {"valid": False, "error": "Transaction reverted"}
 
-        # S7 — Verify transaction is recent (block timestamp < 5 minutes ago)
+        # S5 — Verify transaction is recent (block timestamp < MAX_TX_AGE_SECONDS ago)
         block_hex = receipt.get("blockNumber")
         if block_hex:
             block_payload = {
@@ -87,8 +286,7 @@ async def verify_payment(tx_hash: str, expected_amount: float, expected_sender: 
             if block_result:
                 block_ts = int(block_result.get("timestamp", "0x0"), 16)
                 if time.time() - block_ts > MAX_TX_AGE_SECONDS:
-                    with _tx_lock:
-                        used_tx_hashes.discard(tx_hash)
+                    remove_tx_hash_reservation(tx_hash)
                     return {"valid": False, "error": f"Transaction too old (>{MAX_TX_AGE_SECONDS}s). Only recent transactions accepted."}
 
         expected_raw = int(expected_amount * (10 ** USDC_DECIMALS))
@@ -102,28 +300,26 @@ async def verify_payment(tx_hash: str, expected_amount: float, expected_sender: 
             if to_addr.lower() != WALLET_ADDRESS:
                 continue
 
-            # S7 — Verify sender matches expected payer
+            # S7 — Verify sender matches expected payer using timing-safe comparison
             from_addr = "0x" + topics[1][-40:]
-            if expected_sender and from_addr.lower() != expected_sender.strip().lower():
-                with _tx_lock:
-                    used_tx_hashes.discard(tx_hash)
-                return {"valid": False, "error": f"Payment sender mismatch: expected {expected_sender}, got {from_addr}"}
+            if expected_sender:
+                expected_addr = expected_sender.strip().lower()
+                if not hmac.compare_digest(from_addr.lower(), expected_addr):
+                    remove_tx_hash_reservation(tx_hash)
+                    return {"valid": False, "error": f"Payment sender mismatch: expected {expected_sender}, got {from_addr}"}
 
             raw_amount = int(log_entry.get("data", "0x0"), 16)
             if raw_amount >= expected_raw:
                 return {"valid": True, "error": None}
             got = raw_amount / (10 ** USDC_DECIMALS)
-            with _tx_lock:
-                used_tx_hashes.discard(tx_hash)
+            remove_tx_hash_reservation(tx_hash)
             return {"valid": False, "error": f"Insufficient payment: expected {expected_amount} USDC, got {got}"}
 
-        with _tx_lock:
-            used_tx_hashes.discard(tx_hash)
+        remove_tx_hash_reservation(tx_hash)
         return {"valid": False, "error": "No matching USDC transfer found in transaction"}
     except Exception as exc:
         # On any error, release the reserved hash
-        with _tx_lock:
-            used_tx_hashes.discard(tx_hash)
+        remove_tx_hash_reservation(tx_hash)
         raise exc
 
 # ===========================================================================
@@ -195,8 +391,7 @@ def x402_paywall(price: float, description: str = "", tags: list[str] | None = N
 # ===========================================================================
 # SECTION 4: Marketplace Registration
 # ===========================================================================
-@app.on_event("startup")
-async def register_on_marketplace():
+async def _register_on_marketplace():
     """Auto-register all paid endpoints on x402 Bazaar at startup."""
     if not BAZAAR_REGISTRY_URL:
         logger.warning("Marketplace registration skipped: BAZAAR_REGISTRY_URL not set")
