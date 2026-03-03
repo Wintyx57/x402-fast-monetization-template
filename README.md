@@ -1,27 +1,19 @@
 # x402 Fast Monetization Template
 
-**Monetize any Python function in 3 steps.** Turn your code into a paid API with USDC payments on Base -- no backend experience needed.
+**Turn any Python function into a zero-gas AI Agent API — monetized with USDC, live in 3 steps.**
 
-![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)
-![License MIT](https://img.shields.io/badge/License-MIT-green)
-![USDC on Base](https://img.shields.io/badge/USDC-Base-3C5CFF?logo=ethereum&logoColor=white)
-![x402 Protocol](https://img.shields.io/badge/Protocol-x402-orange)
+![Python](https://img.shields.io/badge/Python-3.11+-blue)
+![USDC](https://img.shields.io/badge/USDC-Base%20%7C%20SKALE-green)
+![License](https://img.shields.io/badge/License-MIT-yellow)
+![x402](https://img.shields.io/badge/Protocol-x402-purple)
 
 ---
 
-## Table of Contents
+## What is this?
 
-- [Quick Start (3 Steps)](#quick-start-3-steps)
-- [One-Click Replit Deploy](#one-click-replit-deploy)
-- [How the @x402_paywall Decorator Works](#how-the-x402_paywall-decorator-works)
-- [Add Your Own Function](#add-your-own-function)
-- [Included Examples](#included-examples)
-- [The x402 Protocol](#the-x402-protocol)
-- [Environment Variables](#environment-variables)
-- [API Documentation](#api-documentation)
-- [Project Structure](#project-structure)
-- [Links](#links)
-- [License](#license)
+This template lets you monetize any Python function as a pay-per-call API using USDC and the [x402 protocol](https://x402bazaar.org). One decorator is all it takes. No subscription logic, no API keys to manage for your callers, no billing infrastructure.
+
+The killer feature: **SKALE Europa is the default chain**. SKALE has zero gas fees — AI agents and bots can make hundreds of micro-payments per minute without burning money on gas. On Base you pay ~$0.001 per transaction; on SKALE you pay nothing.
 
 ---
 
@@ -41,13 +33,11 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Open `.env` and replace the placeholder with your Ethereum wallet address:
+Open `.env` and set your wallet address:
 
 ```env
 WALLET_ADDRESS=0xYOUR_ACTUAL_WALLET_ADDRESS
 ```
-
-This is the address that will receive USDC payments from API callers.
 
 ### 3. Run
 
@@ -55,136 +45,82 @@ This is the address that will receive USDC payments from API callers.
 python main.py
 ```
 
-Your API is live at **http://localhost:8000/docs** -- open it to see the interactive Swagger UI.
+Your API is live at **http://localhost:8000/docs** — open it to see the interactive Swagger UI.
 
 ---
 
-## One-Click Replit Deploy
+## How It Works
 
-[![Run on Replit](https://replit.com/badge/github/Wintyx57/x402-fast-monetization-template)](https://replit.com/@Wintyx57/x402-fast-monetization-template)
+The x402 protocol reuses the HTTP 402 status code ("Payment Required") to create a machine-readable payment flow that AI agents can navigate autonomously:
 
-1. Click the button above
-2. Set `WALLET_ADDRESS` in the Replit Secrets tab
-3. Hit **Run** -- your paid API is live with a public URL
+```
+Client / AI Agent                 Your API                      Chain (SKALE or Base)
+        |                              |                                  |
+        |  1. GET /generate_qr         |                                  |
+        |----------------------------->|                                  |
+        |                              |                                  |
+        |  2. 402 + payment_details    |                                  |
+        |    (amount, wallet, network) |                                  |
+        |<-----------------------------|                                  |
+        |                              |                                  |
+        |  3. Send USDC on SKALE       |                                  |
+        |---------------------------------------------------------------->|
+        |                              |                                  |
+        |  4. GET /generate_qr         |                                  |
+        |    + X-Payment-TxHash: 0x... |                                  |
+        |    + X-Payment-Chain: skale  |                                  |
+        |----------------------------->|                                  |
+        |                              |  5. Verify tx on-chain           |
+        |                              |--------------------------------->|
+        |                              |                                  |
+        |  6. 200 + result             |                                  |
+        |<-----------------------------|                                  |
+```
+
+1. Client calls your API without payment
+2. Server responds 402 with payment details (amount, recipient, USDC contract, all supported networks)
+3. Client sends USDC on the chain of its choice
+4. Client retries with `X-Payment-TxHash` and optionally `X-Payment-Chain` headers
+5. Server verifies the on-chain transaction (correct recipient, sufficient amount, not replayed)
+6. Access granted — your function executes and returns the result
 
 ---
 
-## How the @x402_paywall Decorator Works
+## Supported Networks
 
-The `@x402_paywall` decorator transforms any Python function into a paid FastAPI endpoint. One decorator, one line:
+| Chain | Gas Cost | USDC Contract | Chain ID |
+|-------|----------|---------------|----------|
+| **SKALE Europa** (default) | **FREE** (zero gas with sFUEL) | `0x5F795bb52dAc3085f578f4877D450e2929D2F13d` | 2046399126 |
+| Base | ~$0.001 | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` | 8453 |
+
+Both chains are listed in the 402 response under `payment_details.networks` so agents can pick the cheapest option automatically.
+
+To change the default chain, set `DEFAULT_CHAIN=base` in your `.env`.
+
+---
+
+## The @x402_paywall Decorator
+
+One decorator turns any Python function into a paid FastAPI endpoint:
 
 ```python
-from main import x402_paywall
-
-@x402_paywall(price=0.05, description="My cool API", tags=["cool"])
+@x402_paywall(price=0.05, description="My paid API", tags=["cool"])
 def my_function(param: str) -> dict:
     return {"result": f"You sent: {param}"}
 ```
 
-What happens under the hood:
+What happens automatically:
 
 - The function name becomes the endpoint path (`/my_function`)
-- Function parameters become query parameters (`?param=hello`)
+- Function parameters become URL query parameters (`?param=hello`)
 - The return type hint controls the response format:
   - `dict` -- JSON response
   - `bytes` -- Binary response (e.g., PNG image)
   - `str` -- Plain text response
-- Callers without a valid payment get a `402 Payment Required` response with instructions
-- Callers with a valid `X-Payment-TxHash` header get the function result
+- Callers without a valid payment get a `402` with full payment instructions
+- Callers with a valid `X-Payment-TxHash` get the function result
 
----
-
-## Add Your Own Function
-
-Adding a new paid endpoint takes 3 steps. Open `main.py` and scroll to **Section 5**.
-
-### Step 1: Write your function
-
-```python
-def my_api(query: str, limit: int = 10) -> dict:
-    """Your logic here."""
-    results = do_something(query, limit)
-    return {"data": results}
-```
-
-### Step 2: Add the decorator
-
-```python
-@x402_paywall(price=0.02, description="Search my database", tags=["search", "data"])
-def my_api(query: str, limit: int = 10) -> dict:
-    """Your logic here."""
-    results = do_something(query, limit)
-    return {"data": results}
-```
-
-### Step 3: Restart the server
-
-```bash
-python main.py
-```
-
-Your new endpoint is live at `GET /my_api?query=hello&limit=5` and visible in `/docs`.
-
-**Decorator parameters:**
-
-| Parameter     | Type       | Required | Description                          |
-|---------------|------------|----------|--------------------------------------|
-| `price`       | `float`    | Yes      | Price in USDC per call               |
-| `description` | `str`      | No       | Shown in Swagger UI and marketplace  |
-| `tags`        | `list[str]`| No       | Used for categorization              |
-
----
-
-## Included Examples
-
-The template ships with 3 working examples you can try immediately:
-
-| Endpoint        | Price (USDC) | Description                          | Parameters                   | Returns  |
-|-----------------|-------------|--------------------------------------|------------------------------|----------|
-| `/generate_qr`  | 0.05        | Generate a QR code image from text   | `text` (str)                 | PNG image|
-| `/summarize`    | 0.03        | Summarize text using extractive method | `text` (str), `max_sentences` (int, default 3) | JSON |
-| `/random_joke`  | 0.01        | Get a random programming joke        | None                         | JSON     |
-
-No external API keys needed -- all examples run with zero configuration beyond `WALLET_ADDRESS`.
-
----
-
-## The x402 Protocol
-
-x402 uses the HTTP 402 status code ("Payment Required") to create a machine-readable payment flow:
-
-```
-Client                          Your API                         Base (L2)
-  |                                |                                |
-  |  1. GET /generate_qr?text=hi  |                                |
-  |------------------------------->|                                |
-  |                                |                                |
-  |  2. 402 + payment_details      |                                |
-  |<-------------------------------|                                |
-  |                                |                                |
-  |  3. Send USDC to recipient     |                                |
-  |--------------------------------------------------------------->|
-  |                                |                                |
-  |  4. GET /generate_qr?text=hi   |                                |
-  |    + X-Payment-TxHash: 0xabc   |                                |
-  |------------------------------->|                                |
-  |                                |  5. Verify tx on-chain         |
-  |                                |------------------------------->|
-  |                                |                                |
-  |  6. 200 + QR code image        |                                |
-  |<-------------------------------|                                |
-```
-
-**Step by step:**
-
-1. **Client calls your API** without payment
-2. **Server responds 402** with payment details (amount, recipient wallet, USDC contract address, network)
-3. **Client sends USDC** on Base to your wallet address
-4. **Client retries** the same request with the transaction hash in the `X-Payment-TxHash` header
-5. **Server verifies** the transaction on-chain (correct recipient, sufficient amount, not replayed)
-6. **Access granted** -- the function executes and returns the result
-
-The 402 response body looks like this:
+The 402 response body that agents receive:
 
 ```json
 {
@@ -192,75 +128,103 @@ The 402 response body looks like this:
   "payment_details": {
     "amount": "0.05",
     "currency": "USDC",
-    "network": "Base",
-    "chain_id": 8453,
+    "network": "SKALE Europa",
+    "chain_id": 2046399126,
     "recipient": "0xYOUR_WALLET_ADDRESS",
-    "usdc_contract": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-    "rpc_url": "https://mainnet.base.org",
-    "instructions": "Send USDC on Base to the recipient address, then retry with header X-Payment-TxHash: 0x..."
+    "usdc_contract": "0x5F795bb52dAc3085f578f4877D450e2929D2F13d",
+    "networks": [
+      { "chain": "base", "label": "Base", "chain_id": 8453, "gas": "~$0.001", ... },
+      { "chain": "skale", "label": "SKALE Europa", "chain_id": 2046399126, "gas": "FREE (zero gas with sFUEL)", ... }
+    ],
+    "instructions": "Send USDC on SKALE Europa to the recipient address, then retry with headers X-Payment-TxHash: 0x... and X-Payer-Address: 0x... Optionally add X-Payment-Chain: base|skale to select the network."
   }
 }
 ```
 
 ---
 
+## Add Your Own API
+
+Open `main.py` and go to **Section 5**. Adding a new paid endpoint is 3 lines:
+
+```python
+@x402_paywall(price=0.02, description="Search my database", tags=["search", "data"])
+def my_api(query: str, limit: int = 10) -> dict:
+    results = do_something(query, limit)
+    return {"data": results}
+```
+
+Restart the server — your endpoint is live at `GET /my_api?query=hello&limit=5` and visible in `/docs`.
+
+**Decorator parameters:**
+
+| Parameter     | Type        | Required | Description                         |
+|---------------|-------------|----------|-------------------------------------|
+| `price`       | `float`     | Yes      | Price in USDC per call              |
+| `description` | `str`       | No       | Shown in Swagger UI and marketplace |
+| `tags`        | `list[str]` | No       | Used for categorization             |
+
+---
+
+## Included Examples
+
+The template ships with 3 working endpoints, no external API keys required:
+
+| Endpoint        | Price (USDC) | Description                              | Returns   |
+|-----------------|-------------|------------------------------------------|-----------|
+| `/generate_qr`  | 0.05        | Generate a QR code image from text       | PNG image |
+| `/summarize`    | 0.03        | Summarize text (extractive, word-freq)   | JSON      |
+| `/random_joke`  | 0.01        | Get a random programming joke            | JSON      |
+
+---
+
 ## Environment Variables
 
-Configure your API via a `.env` file (copy `.env.example` to get started):
-
-| Variable              | Required | Default                        | Description                                       |
-|-----------------------|----------|--------------------------------|---------------------------------------------------|
-| `WALLET_ADDRESS`      | Yes      | --                             | Your Ethereum address to receive USDC payments    |
-| `BASE_RPC_URL`        | No       | `https://mainnet.base.org`     | Base RPC endpoint for on-chain verification        |
-| `BAZAAR_REGISTRY_URL` | No       | --                             | x402 Bazaar URL for auto-registering your endpoints|
-| `API_BASE_URL`        | No       | `http://localhost:8000`        | Public URL of your API (used for marketplace)      |
-| `PORT`                | No       | `8000`                         | Server listening port                              |
-
----
-
-## API Documentation
-
-FastAPI auto-generates interactive API docs. Once the server is running:
-
-- **Swagger UI** -- [http://localhost:8000/docs](http://localhost:8000/docs)
-- **Health check** -- `GET /` returns a list of all paid endpoints
-- **Status** -- `GET /health` returns `{"status": "ok"}`
+| Variable              | Required | Default        | Description                                           |
+|-----------------------|----------|----------------|-------------------------------------------------------|
+| `WALLET_ADDRESS`      | Yes      | --             | Your Ethereum address to receive USDC payments        |
+| `DEFAULT_CHAIN`       | No       | `skale`        | Default payment chain: `skale` or `base`              |
+| `BASE_RPC_URL`        | No       | chain default  | Override the Base RPC endpoint                        |
+| `BAZAAR_REGISTRY_URL` | No       | --             | x402 Bazaar URL for auto-registering your endpoints   |
+| `API_BASE_URL`        | No       | `http://localhost:8000` | Public URL of your API (used for marketplace) |
+| `PORT`                | No       | `8000`         | Server listening port                                 |
 
 ---
 
-## Project Structure
+## Deploy
 
-```
-x402-fast-monetization-template/
-  main.py             # Single-file API -- all logic lives here
-  requirements.txt    # Python dependencies
-  .env.example        # Environment variable template
-  .replit             # Replit run configuration
-  replit.nix          # Replit system dependencies
-  LICENSE             # MIT License
-  README.md           # This file
-  SPECS.md            # Full technical specifications
+**Replit (one-click):**
+
+[![Run on Replit](https://replit.com/badge/github/Wintyx57/x402-fast-monetization-template)](https://replit.com/@Wintyx57/x402-fast-monetization-template)
+
+1. Click the button above
+2. Set `WALLET_ADDRESS` in the Replit Secrets tab
+3. Hit Run — your API is live with a public URL
+
+**Railway / Render:**
+
+```bash
+# Set environment variables in the dashboard, then deploy:
+git push
 ```
 
-Everything runs from `main.py`. One file, no framework boilerplate, no build step.
+Both platforms detect Python automatically. Set `WALLET_ADDRESS` and optionally `DEFAULT_CHAIN` in the environment variables panel.
 
 ---
 
-## Ecosystem
+## Links
 
-| Repository | Description |
-|---|---|
-| **[x402-backend](https://github.com/Wintyx57/x402-backend)** | API server, 69 native endpoints, payment middleware, MCP server |
-| **[x402-frontend](https://github.com/Wintyx57/x402-frontend)** | React + TypeScript UI, wallet connect |
-| **[x402-bazaar-cli](https://github.com/Wintyx57/x402-bazaar-cli)** | `npx x402-bazaar` -- CLI with 7 commands |
-| **[x402-sdk](https://github.com/Wintyx57/x402-sdk)** | TypeScript SDK for AI agents |
-| **[x402-langchain](https://github.com/Wintyx57/x402-langchain)** | Python LangChain tools |
-| **[x402-fast-monetization-template](https://github.com/Wintyx57/x402-fast-monetization-template)** | FastAPI template (this repo) |
-
-**Live:** [x402bazaar.org](https://x402bazaar.org) | **API:** [x402-api.onrender.com](https://x402-api.onrender.com)
+| Resource | URL |
+|----------|-----|
+| x402 Bazaar marketplace | [x402bazaar.org](https://x402bazaar.org) |
+| Backend API | [x402-api.onrender.com](https://x402-api.onrender.com) |
+| CLI (`npx x402-bazaar`) | [x402-bazaar-cli](https://github.com/Wintyx57/x402-bazaar-cli) |
+| TypeScript SDK | [x402-sdk](https://github.com/Wintyx57/x402-sdk) |
+| LangChain tools | [x402-langchain](https://github.com/Wintyx57/x402-langchain) |
+| MCP Server | [x402-backend](https://github.com/Wintyx57/x402-backend) |
 
 ---
 
 ## License
 
-[MIT](LICENSE) -- Use it, fork it, monetize with it.
+[MIT](LICENSE) — Use it, fork it, monetize with it.

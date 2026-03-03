@@ -1,5 +1,5 @@
 """x402 Fast Monetization Template -- Golden Script
-Monetize any Python function with USDC payments on Base via HTTP 402.
+Monetize any Python function with USDC payments on Base or SKALE Europa via HTTP 402.
 """
 
 # ===========================================================================
@@ -16,7 +16,26 @@ from fastapi.responses import JSONResponse, Response, PlainTextResponse
 
 load_dotenv()
 
-USDC_CONTRACT = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+CHAINS = {
+    "base": {
+        "rpc_url": "https://mainnet.base.org",
+        "usdc_contract": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "chain_id": 8453,
+        "label": "Base",
+        "explorer": "https://basescan.org",
+        "gas": "~$0.001",
+    },
+    "skale": {
+        "rpc_url": "https://mainnet.skalenodes.com/v1/elated-tan-skat",
+        "usdc_contract": "0x5F795bb52dAc3085f578f4877D450e2929D2F13d",
+        "chain_id": 2046399126,
+        "label": "SKALE Europa",
+        "explorer": "https://elated-tan-skat.explorer.mainnet.skalenodes.com",
+        "gas": "FREE (zero gas with sFUEL)",
+    },
+}
+DEFAULT_CHAIN = os.getenv("DEFAULT_CHAIN", "skale")  # Default to SKALE for zero gas!
+
 TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 USDC_DECIMALS = 6
 
@@ -62,11 +81,18 @@ try:
 except ValueError as e:
     raise RuntimeError(f"Invalid WALLET_ADDRESS: {e}")
 
-BASE_RPC_URL = os.getenv("BASE_RPC_URL", "https://mainnet.base.org")
-try:
-    BASE_RPC_URL = validate_rpc_url(BASE_RPC_URL)
-except ValueError as e:
-    raise RuntimeError(f"Invalid BASE_RPC_URL: {e}")
+# BASE_RPC_URL is optional: if set, it overrides the RPC for the default chain.
+_base_rpc_override = os.getenv("BASE_RPC_URL")
+if _base_rpc_override:
+    try:
+        _base_rpc_override = validate_rpc_url(_base_rpc_override)
+    except ValueError as e:
+        raise RuntimeError(f"Invalid BASE_RPC_URL: {e}")
+    CHAINS["base"]["rpc_url"] = _base_rpc_override
+
+# Validate DEFAULT_CHAIN value
+if DEFAULT_CHAIN not in CHAINS:
+    raise RuntimeError(f"DEFAULT_CHAIN must be one of {list(CHAINS.keys())}, got: {DEFAULT_CHAIN}")
 
 BAZAAR_REGISTRY_URL = os.getenv("BAZAAR_REGISTRY_URL", "")
 API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
@@ -241,8 +267,8 @@ async def _startup_handler():
 # ===========================================================================
 
 
-async def verify_payment(tx_hash: str, expected_amount: float, expected_sender: str | None = None) -> dict:
-    """Verify a USDC payment on Base via eth_getTransactionReceipt.
+async def verify_payment(tx_hash: str, expected_amount: float, expected_sender: str | None = None, chain: str | None = None) -> dict:
+    """Verify a USDC payment on Base or SKALE Europa via eth_getTransactionReceipt.
 
     This function implements multiple security checks:
     - S8: Atomic check-and-reserve to prevent double-spend race conditions (file-based, persistent)
@@ -251,6 +277,11 @@ async def verify_payment(tx_hash: str, expected_amount: float, expected_sender: 
     - S5: Validate transaction age
     """
     tx_hash = tx_hash.strip().lower()
+
+    chain_key = chain if chain in CHAINS else DEFAULT_CHAIN
+    chain_cfg = CHAINS[chain_key]
+    rpc_url = chain_cfg["rpc_url"]
+    usdc_contract = chain_cfg["usdc_contract"]
 
     # S8 — Atomic check-and-reserve using persistent file store to prevent
     # double-spend race conditions across server restarts and multiple workers
@@ -263,7 +294,7 @@ async def verify_payment(tx_hash: str, expected_amount: float, expected_sender: 
             "method": "eth_getTransactionReceipt", "params": [tx_hash],
         }
         async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.post(BASE_RPC_URL, json=rpc_payload)
+            resp = await client.post(rpc_url, json=rpc_payload)
         receipt = resp.json().get("result")
 
         if not receipt:
@@ -281,7 +312,7 @@ async def verify_payment(tx_hash: str, expected_amount: float, expected_sender: 
                 "method": "eth_getBlockByNumber", "params": [block_hex, False],
             }
             async with httpx.AsyncClient(timeout=15) as client:
-                block_resp = await client.post(BASE_RPC_URL, json=block_payload)
+                block_resp = await client.post(rpc_url, json=block_payload)
             block_result = block_resp.json().get("result")
             if block_result:
                 block_ts = int(block_result.get("timestamp", "0x0"), 16)
@@ -291,7 +322,7 @@ async def verify_payment(tx_hash: str, expected_amount: float, expected_sender: 
 
         expected_raw = int(expected_amount * (10 ** USDC_DECIMALS))
         for log_entry in receipt.get("logs", []):
-            if log_entry.get("address", "").lower() != USDC_CONTRACT.lower():
+            if log_entry.get("address", "").lower() != usdc_contract.lower():
                 continue
             topics = log_entry.get("topics", [])
             if len(topics) < 3 or topics[0].lower() != TRANSFER_TOPIC:
@@ -347,20 +378,44 @@ def x402_paywall(price: float, description: str = "", tags: list[str] | None = N
         async def route_handler(request: Request, **kwargs):
             tx_hash = request.headers.get("X-Payment-TxHash")
             if not tx_hash:
+                # Build the networks list from CHAINS for agent discoverability
+                networks = [
+                    {
+                        "chain": key,
+                        "label": cfg["label"],
+                        "chain_id": cfg["chain_id"],
+                        "usdc_contract": cfg["usdc_contract"],
+                        "rpc_url": cfg["rpc_url"],
+                        "gas": cfg["gas"],
+                        "explorer": cfg["explorer"],
+                    }
+                    for key, cfg in CHAINS.items()
+                ]
+                default_cfg = CHAINS[DEFAULT_CHAIN]
                 return JSONResponse(status_code=402, content={
                     "error": "Payment Required",
                     "payment_details": {
                         "amount": str(price), "currency": "USDC",
-                        "network": "Base", "chain_id": 8453,
+                        "network": default_cfg["label"],
+                        "chain_id": default_cfg["chain_id"],
                         "recipient": WALLET_ADDRESS,
-                        "usdc_contract": USDC_CONTRACT, "rpc_url": BASE_RPC_URL,
-                        "instructions": "Send USDC on Base to the recipient address, then retry with headers X-Payment-TxHash: 0x... and X-Payer-Address: 0x...",
+                        "usdc_contract": default_cfg["usdc_contract"],
+                        "rpc_url": default_cfg["rpc_url"],
+                        "networks": networks,
+                        "instructions": (
+                            f"Send USDC on {default_cfg['label']} to the recipient address, "
+                            "then retry with headers X-Payment-TxHash: 0x... and X-Payer-Address: 0x... "
+                            "Optionally add X-Payment-Chain: base|skale to select the network."
+                        ),
                     },
                 })
 
+            # Determine chain from header (default to DEFAULT_CHAIN)
+            payment_chain = request.headers.get("X-Payment-Chain", DEFAULT_CHAIN).lower()
+
             # S7 — Verify sender address if provided
             payer_address = request.headers.get("X-Payer-Address")
-            check = await verify_payment(tx_hash, price, expected_sender=payer_address)
+            check = await verify_payment(tx_hash, price, expected_sender=payer_address, chain=payment_chain)
             if not check["valid"]:
                 return JSONResponse(status_code=402, content={"error": check["error"]})
 
@@ -401,7 +456,8 @@ async def _register_on_marketplace():
             payload = {
                 "name": entry["name"],
                 "url": f"{API_BASE_URL.rstrip('/')}{entry['path']}",
-                "price": entry["price"], "currency": "USDC", "network": "Base",
+                "price": entry["price"], "currency": "USDC",
+                "network": CHAINS[DEFAULT_CHAIN]["label"],
                 "description": entry["description"], "tags": entry["tags"],
                 "protocol": "x402",
             }
