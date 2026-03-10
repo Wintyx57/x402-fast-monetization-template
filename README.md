@@ -13,7 +13,7 @@
 
 This template lets you monetize any Python function as a pay-per-call API using USDC and the [x402 protocol](https://x402bazaar.org). One decorator is all it takes. No subscription logic, no API keys to manage for your callers, no billing infrastructure.
 
-The killer feature: **SKALE Europa is the default chain**. SKALE has zero gas fees — AI agents and bots can make hundreds of micro-payments per minute without burning money on gas. On Base you pay ~$0.001 per transaction; on SKALE you pay nothing.
+The killer feature: **SKALE on Base is the default chain**. SKALE on Base has ultra-low gas fees (~$0.0007/tx via CREDITS) — AI agents and bots can make hundreds of micro-payments per minute without burning money on gas. On Base you pay ~$0.001 per transaction; on SKALE on Base you pay a fraction of a cent.
 
 ---
 
@@ -90,8 +90,8 @@ Client / AI Agent                 Your API                      Chain (SKALE or 
 
 | Chain | Gas Cost | USDC Contract | Chain ID |
 |-------|----------|---------------|----------|
-| **SKALE Europa** (default) | **FREE** (zero gas with sFUEL) | `0x5F795bb52dAc3085f578f4877D450e2929D2F13d` | 2046399126 |
 | Base | ~$0.001 | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` | 8453 |
+| **SKALE on Base** (default) | **~$0.0007** (CREDITS gas token) | `0x85889c8c714505E0c94b30fcfcF64fE3Ac8FCb20` | 1187947933 |
 
 Both chains are listed in the 402 response under `payment_details.networks` so agents can pick the cheapest option automatically.
 
@@ -128,15 +128,15 @@ The 402 response body that agents receive:
   "payment_details": {
     "amount": "0.05",
     "currency": "USDC",
-    "network": "SKALE Europa",
-    "chain_id": 2046399126,
+    "network": "SKALE on Base",
+    "chain_id": 1187947933,
     "recipient": "0xYOUR_WALLET_ADDRESS",
-    "usdc_contract": "0x5F795bb52dAc3085f578f4877D450e2929D2F13d",
+    "usdc_contract": "0x85889c8c714505E0c94b30fcfcF64fE3Ac8FCb20",
     "networks": [
       { "chain": "base", "label": "Base", "chain_id": 8453, "gas": "~$0.001", ... },
-      { "chain": "skale", "label": "SKALE Europa", "chain_id": 2046399126, "gas": "FREE (zero gas with sFUEL)", ... }
+      { "chain": "skale", "label": "SKALE on Base", "chain_id": 1187947933, "gas": "~$0.0007 (CREDITS)", ... }
     ],
-    "instructions": "Send USDC on SKALE Europa to the recipient address, then retry with headers X-Payment-TxHash: 0x... and X-Payer-Address: 0x... Optionally add X-Payment-Chain: base|skale to select the network."
+    "instructions": "Send USDC on SKALE on Base to the recipient address, then retry with headers X-Payment-TxHash: 0x... and X-Payer-Address: 0x... Optionally add X-Payment-Chain: base|skale to select the network."
   }
 }
 ```
