@@ -35,6 +35,8 @@ cp .env.example .env
 
 Open `.env` and set your wallet address:
 
+> **Need USDC?** Bridge from any chain → SKALE in 1 click: [x402bazaar.org/fund](https://x402bazaar.org/fund)
+
 ```env
 WALLET_ADDRESS=0xYOUR_ACTUAL_WALLET_ADDRESS
 ```
