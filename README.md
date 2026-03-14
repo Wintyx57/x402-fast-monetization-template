@@ -3,7 +3,7 @@
 **Turn any Python function into a zero-gas AI Agent API — monetized with USDC, live in 3 steps.**
 
 ![Python](https://img.shields.io/badge/Python-3.11+-blue)
-![USDC](https://img.shields.io/badge/USDC-Base%20%7C%20SKALE-green)
+![USDC](https://img.shields.io/badge/USDC-Base%20%7C%20SKALE%20%7C%20Polygon-green)
 ![License](https://img.shields.io/badge/License-MIT-yellow)
 ![x402](https://img.shields.io/badge/Protocol-x402-purple)
 
@@ -94,10 +94,11 @@ Client / AI Agent                 Your API                      Chain (SKALE or 
 |-------|----------|---------------|----------|
 | Base | ~$0.001 | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` | 8453 |
 | **SKALE on Base** (default) | **~$0.0007** (CREDITS gas token) | `0x85889c8c714505E0c94b30fcfcF64fE3Ac8FCb20` | 1187947933 |
+| Polygon | ~$0.001 (MATIC) | `0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359` | 137 |
 
-Both chains are listed in the 402 response under `payment_details.networks` so agents can pick the cheapest option automatically.
+All chains are listed in the 402 response under `payment_details.networks` so agents can pick the cheapest option automatically.
 
-To change the default chain, set `DEFAULT_CHAIN=base` in your `.env`.
+To change the default chain, set `DEFAULT_CHAIN=base` or `DEFAULT_CHAIN=polygon` in your `.env`.
 
 ---
 
