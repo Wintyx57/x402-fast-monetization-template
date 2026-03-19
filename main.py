@@ -1,5 +1,5 @@
 """x402 Fast Monetization Template -- Golden Script
-Monetize any Python function with USDC payments on Base or SKALE Europa via HTTP 402.
+Monetize any Python function with USDC payments on Base, SKALE on Base, or Polygon via HTTP 402.
 """
 
 # ===========================================================================
@@ -26,12 +26,20 @@ CHAINS = {
         "gas": "~$0.001",
     },
     "skale": {
-        "rpc_url": "https://mainnet.skalenodes.com/v1/elated-tan-skat",
-        "usdc_contract": "0x5F795bb52dAc3085f578f4877D450e2929D2F13d",
-        "chain_id": 2046399126,
-        "label": "SKALE Europa",
-        "explorer": "https://elated-tan-skat.explorer.mainnet.skalenodes.com",
-        "gas": "FREE (zero gas with sFUEL)",
+        "rpc_url": "https://skale-base.skalenodes.com/v1/base",
+        "usdc_contract": "0x85889c8c714505E0c94b30fcfcF64fE3Ac8FCb20",
+        "chain_id": 1187947933,
+        "label": "SKALE on Base",
+        "explorer": "https://base.explorer.skalenodes.com",
+        "gas": "~$0.0007 (CREDITS)",
+    },
+    "polygon": {
+        "rpc_url": "https://polygon-rpc.com",
+        "usdc_contract": "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
+        "chain_id": 137,
+        "label": "Polygon",
+        "explorer": "https://polygonscan.com",
+        "gas": "~$0.001 (MATIC)",
     },
 }
 DEFAULT_CHAIN = os.getenv("DEFAULT_CHAIN", "skale")  # Default to SKALE for zero gas!
@@ -268,7 +276,7 @@ async def _startup_handler():
 
 
 async def verify_payment(tx_hash: str, expected_amount: float, expected_sender: str | None = None, chain: str | None = None) -> dict:
-    """Verify a USDC payment on Base or SKALE Europa via eth_getTransactionReceipt.
+    """Verify a USDC payment on Base, SKALE on Base, or Polygon via eth_getTransactionReceipt.
 
     This function implements multiple security checks:
     - S8: Atomic check-and-reserve to prevent double-spend race conditions (file-based, persistent)
@@ -405,7 +413,7 @@ def x402_paywall(price: float, description: str = "", tags: list[str] | None = N
                         "instructions": (
                             f"Send USDC on {default_cfg['label']} to the recipient address, "
                             "then retry with headers X-Payment-TxHash: 0x... and X-Payer-Address: 0x... "
-                            "Optionally add X-Payment-Chain: base|skale to select the network."
+                            "Optionally add X-Payment-Chain: base|skale|polygon to select the network."
                         ),
                     },
                 })
